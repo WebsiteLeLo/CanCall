@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: cancall
+    runtime: node
+    region: oregon
+    buildCommand: npm install -g pnpm && pnpm install --frozen-lockfile && pnpm --filter @workspace/cancall run build
+    staticPublishPath: artifacts/cancall/dist/public
+    pullRequestPreviewsEnabled: false
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
