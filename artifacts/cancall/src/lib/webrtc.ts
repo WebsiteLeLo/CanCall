@@ -26,6 +26,8 @@ export class WebRTCCall {
   roomId: string | null = null;
   mode: CallMode;
   private unsubs: Unsubscribe[] = [];
+  private remoteDescSet = false;
+  private pendingCandidates: RTCIceCandidateInit[] = [];
 
   constructor(mode: CallMode = "video") {
     this.mode = mode;
@@ -37,6 +39,26 @@ export class WebRTCCall {
         this.remoteStream.addTrack(track);
       });
     };
+  }
+
+  private async safeAddCandidate(data: RTCIceCandidateInit) {
+    if (this.remoteDescSet) {
+      try {
+        await this.pc.addIceCandidate(new RTCIceCandidate(data));
+      } catch (_) {}
+    } else {
+      this.pendingCandidates.push(data);
+    }
+  }
+
+  private async flushPendingCandidates() {
+    const candidates = [...this.pendingCandidates];
+    this.pendingCandidates = [];
+    for (const c of candidates) {
+      try {
+        await this.pc.addIceCandidate(new RTCIceCandidate(c));
+      } catch (_) {}
+    }
   }
 
   async getLocalMedia() {
@@ -60,7 +82,7 @@ export class WebRTCCall {
 
     this.pc.onicecandidate = (event) => {
       if (event.candidate) {
-        addDoc(offerCandidatesRef, event.candidate.toJSON());
+        addDoc(offerCandidatesRef, event.candidate.toJSON()).catch(() => {});
       }
     };
 
@@ -75,11 +97,14 @@ export class WebRTCCall {
 
     await setDoc(roomRef, { offer });
 
-    const unsub = onSnapshot(roomRef, (snapshot) => {
+    const unsub = onSnapshot(roomRef, async (snapshot) => {
       const data = snapshot.data();
-      if (!this.pc.currentRemoteDescription && data?.answer) {
-        const answerDescription = new RTCSessionDescription(data.answer);
-        this.pc.setRemoteDescription(answerDescription);
+      if (!this.remoteDescSet && data?.answer) {
+        this.remoteDescSet = true;
+        try {
+          await this.pc.setRemoteDescription(new RTCSessionDescription(data.answer));
+          await this.flushPendingCandidates();
+        } catch (_) {}
       }
     });
     this.unsubs.push(unsub);
@@ -87,8 +112,7 @@ export class WebRTCCall {
     const unsub2 = onSnapshot(answerCandidatesRef, (snapshot) => {
       snapshot.docChanges().forEach((change) => {
         if (change.type === "added") {
-          const candidate = new RTCIceCandidate(change.doc.data());
-          this.pc.addIceCandidate(candidate);
+          this.safeAddCandidate(change.doc.data() as RTCIceCandidateInit);
         }
       });
     });
@@ -111,13 +135,13 @@ export class WebRTCCall {
 
     this.pc.onicecandidate = (event) => {
       if (event.candidate) {
-        addDoc(answerCandidatesRef, event.candidate.toJSON());
+        addDoc(answerCandidatesRef, event.candidate.toJSON()).catch(() => {});
       }
     };
 
     const roomData = roomSnapshot.data();
-    const offerDescription = roomData.offer;
-    await this.pc.setRemoteDescription(new RTCSessionDescription(offerDescription));
+    await this.pc.setRemoteDescription(new RTCSessionDescription(roomData.offer));
+    this.remoteDescSet = true;
 
     const answerDescription = await this.pc.createAnswer();
     await this.pc.setLocalDescription(answerDescription);
@@ -128,12 +152,12 @@ export class WebRTCCall {
     };
 
     await setDoc(roomRef, { ...roomData, answer });
+    await this.flushPendingCandidates();
 
     const unsub = onSnapshot(offerCandidatesRef, (snapshot) => {
       snapshot.docChanges().forEach((change) => {
         if (change.type === "added") {
-          const data = change.doc.data();
-          this.pc.addIceCandidate(new RTCIceCandidate(data));
+          this.safeAddCandidate(change.doc.data() as RTCIceCandidateInit);
         }
       });
     });
